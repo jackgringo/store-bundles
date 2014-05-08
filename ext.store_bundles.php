@@ -1,8 +1,5 @@
 <?php
 
-namespace StoreBundles;
-
-use Store\Model\OrderAdjustment;
 /**
  * ExpressionEngine - by EllisLab
  *
@@ -44,6 +41,7 @@ class Store_bundles_ext {
 	public function __construct($settings = '')
 	{
 		$this->settings = $settings;
+		$this->EE = isset($settings['EE']) ? $settings['EE'] : ee();
 	}
 	
 	// ----------------------------------------------------------------------
@@ -58,11 +56,78 @@ class Store_bundles_ext {
 	 *
 	 * @see http://expressionengine.com/user_guide/development/extensions.html#settings
 	 */
-	public function settings()
+	public function settings_form($current)
 	{
-		return array(
-			
+		$this->EE->load->helper('form');
+    	$this->EE->load->library('table');
+
+    	$multis_field = isset($current['multis_field']) ? $current['multis_field'] : "";
+    	$discount_amt_field = isset($current['discount_amt_field']) ? $current['discount_amt_field'] : "";
+    	$discounts_info_field = isset($current['discounts_info_field']) ? $current['discounts_info_field'] : "order_custom9";
+
+    	$vars['settings'] = array(
+			"multis_field" => form_input('multis_field', $multis_field),
+			"discount_amt_field" => form_input('discount_amt_field', $discount_amt_field),
+			"discounts_info_field" => form_input('discounts_info_field', $discounts_info_field)
 		);
+
+    	return $this->EE->load->view('index', $vars, TRUE);
+	}
+
+	/**
+	 * Save Settings
+	 *
+	 * This function provides a little extra processing and validation
+	 * than the generic settings form.
+	 *
+	 * @return void
+	 */
+	function save_settings()
+	{
+	    if (empty($_POST))
+	    {
+	        show_error(lang('unauthorized_access'));
+	    }
+
+	    unset($_POST['submit']);
+
+	    $this->EE->lang->loadfile('store_bundles');
+
+	    $multis_field = ee()->input->post('multis_field');
+	    $discount_amt_field = ee()->input->post('discount_amt_field');
+	    $discounts_info_field = ee()->input->post('discounts_info_field');
+
+	    if ( empty($multis_field) )
+	    {
+	        $this->EE->session->set_flashdata(
+	                'message_failure',
+	                sprintf(lang('multis_field'),
+	                    $multis_field)
+	        );
+	        $this->EE->functions->redirect(
+	            BASE.AMP.'C=addons_extensions'.AMP.'M=extension_settings'.AMP.'file=store_bundles'
+	        );
+	    }
+
+	    if ( empty($discount_amt_field) )
+	    {
+	        $this->EE->session->set_flashdata(
+	                'message_failure',
+	                sprintf(lang('discount_amt_field'),
+	                    $discount_amt_field)
+	        );
+	        $this->EE->functions->redirect(
+	            BASE.AMP.'C=addons_extensions'.AMP.'M=extension_settings'.AMP.'file=store_bundles'
+	        );
+	    }
+
+	    $this->EE->db->where('class', __CLASS__);
+	    $this->EE->db->update('extensions', array('settings' => serialize($_POST)));
+
+	    $this->EE->session->set_flashdata(
+	        'message_success',
+	        lang('preferences_updated')
+	    );
 	}
 	
 	// ----------------------------------------------------------------------
@@ -91,7 +156,7 @@ class Store_bundles_ext {
 			'enabled'	=> 'y'
 		);
 
-		ee()->db->insert('extensions', $data);	
+		$this->EE->db->insert('extensions', $data);	
 		
 	}	
 
@@ -105,25 +170,42 @@ class Store_bundles_ext {
 	 */
 	public function store_order_recalculate_end($order)
 	{
+		// exit(print_r($this->EE->store));
 		$multis = $this->get_bundle_entries();
 		$items = $this->get_cart_items($order);
 		$item_ids = $this->get_item_ids($order->items);
 
+		$discounts_info_field = $this->settings['discounts_info_field'];
+		$order->$discounts_info_field = "";
+
 		foreach($multis->result_array() as $multi)
 		{
-			$this->detect_multi_discount($item_ids, $multi);
+			$multi_entry = $this->get_multi_entry($multi);
+			$multi_ids = $this->get_multi_ids($multi_entry);
+
+			if($multi_ids) {
+				$discounts_count = $this->detect_multi_discounts($item_ids, $multi_entry);
+				$discount_amt = $this->calculate_discount_amt($discounts_count, $multi_entry);
+
+				if($discount_amt > 0) {
+					$order = $this->add_discounts_info($order, $multi_entry, $discount_amt);
+					$order->order_discount = $order->order_discount + $discount_amt;
+					$order->order_total -= $discount_amt;
+				}
+			}
 		}
 
-        $order->order_discount = 9;
         $order->save();
+
+        // print_r($order);
 
 		return $order;
 	}
 
 	public function get_bundle_entries()
 	{
-		ee()->load->model('channel_entries_model');
-		return ee()->channel_entries_model->get_entries(10);
+		$this->EE->load->model('channel_entries_model');
+		return $this->EE->channel_entries_model->get_entries(10);
 	}
 
 	public function get_cart_items($order)
@@ -136,28 +218,95 @@ class Store_bundles_ext {
 		$ids = array();
 		foreach($items as $item)
 		{
-			$ids[] = $item->entry_id;
+			if(isset($item->entry_id)) {
+				$ids[] = $item->entry_id;
+			}
 		}
-		return $ids;
+		return !empty($ids) ? $ids : null;
 	}
 
 	public function get_multi_ids($entry)
 	{
-		$multis_field = "field_id_46";
-		if( preg_match_all("/\\[([0-9]*)\\]/uim", $entry->$multis_field, $matches) )
+		if( preg_match_all("/\\[([0-9]+)\\]/uim", $entry[$this->settings['multis_field']], $matches) )
 		{
 			return $matches[1];
 		}
-		else {
-			return false;
+	}
+
+	public function get_multi_discount_amt($entry)
+	{
+		return $entry[$this->settings['discount_amt_field']];
+	}
+
+	public function get_multi_entry($multi)
+	{
+		$this->EE->load->model('channel_entries_model');
+		$entry = $this->EE->channel_entries_model->get_entry($multi['entry_id'], 10);
+		$results = $entry->result_array();
+		$entry = $results[0];
+		return $entry;
+	}
+
+	public function detect_multi_discounts($item_ids, $multi_entry)
+	{
+		// Example: $item_ids = array(12, 34, 45, 56, 67); $multi_ids = array(12, 45, 67);
+		$multi_ids = $this->get_multi_ids($multi_entry);
+		$min = count($multi_ids);
+		$matches = 0;
+
+		while ($this->is_multi_discount($item_ids, $multi_ids, $min)) {
+			$matches += 1;
+		}
+
+		return $matches;
+	}
+
+	public function is_multi_discount(&$item_ids, $multi_ids, $min)
+	{
+		$group = array();
+		foreach($multi_ids as $index => $item_id)
+		{
+			if(($idx = array_search($item_id, $item_ids)) !== FALSE) {
+				$group[] = $item_id;
+				unset($multi_ids[$index]);
+				unset($item_ids[$idx]);
+			}
+		}
+		if(count($group) == $min) {
+			return $group;
 		}
 	}
 
-	public function detect_multi_discount($item_ids, $multi)
+	public function calculate_discount_amt($discounts_count, $multi_entry)
 	{
-		ee()->load->model('channel_entries_model');
-		$entry = ee()->channel_entries_model->get_entry($multi['entry_id'], 10);
-		$multi_ids = $this->get_multi_ids($entry->row());
+		$discount_amt = $this->get_multi_discount_amt($multi_entry);
+		return $discount_amt * $discounts_count;
+	}
+
+	public function add_discounts_info($order, $multi_entry)
+	{
+		// $info = $this->update_discounts_info($order, $multi_entry, $discount_amt);
+
+		$info_field = $this->settings['discounts_info_field'];
+		$current_info = unserialize($order->$info_field);
+
+		if(empty($current_info)) {
+			$current_info = array();
+		}
+
+		$discount_val = (float)$multi_entry[$this->settings['discount_amt_field']];
+
+		$discount = array(
+			"title" => $multi_entry['title'],
+			"discount_val" => $discount_val,
+			"discount" => "&pound;" . number_format($discount_val, 2)
+		);
+
+		$current_info[] = $discount;
+
+		$order->$info_field = serialize($current_info);
+
+		return $order;
 	}
 
 	// ----------------------------------------------------------------------
@@ -171,8 +320,8 @@ class Store_bundles_ext {
 	 */
 	function disable_extension()
 	{
-		ee()->db->where('class', __CLASS__);
-		ee()->db->delete('extensions');
+		$this->EE->db->where('class', __CLASS__);
+		$this->EE->db->delete('extensions');
 	}
 
 	// ----------------------------------------------------------------------
