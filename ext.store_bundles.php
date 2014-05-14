@@ -62,10 +62,12 @@ class Store_bundles_ext {
     	$this->EE->load->library('table');
 
     	$multis_field = isset($current['multis_field']) ? $current['multis_field'] : "";
+    	$multis_channel_id = isset($current['multis_channel_id']) ? $current['multis_channel_id'] : "";
     	$discount_amt_field = isset($current['discount_amt_field']) ? $current['discount_amt_field'] : "";
     	$discounts_info_field = isset($current['discounts_info_field']) ? $current['discounts_info_field'] : "order_custom9";
 
     	$vars['settings'] = array(
+			"multis_channel_id" => form_input('multis_channel_id', $multis_channel_id),
 			"multis_field" => form_input('multis_field', $multis_field),
 			"discount_amt_field" => form_input('discount_amt_field', $discount_amt_field),
 			"discounts_info_field" => form_input('discounts_info_field', $discounts_info_field)
@@ -170,13 +172,26 @@ class Store_bundles_ext {
 	 */
 	public function store_order_recalculate_end($order)
 	{
-		// exit(print_r($this->EE->store));
-		$multis = $this->get_bundle_entries();
-		$items = $this->get_cart_items($order);
-		$item_ids = $this->get_item_ids($order->items);
+		if(!$this->settings_exist(array(
+			'multis_field',
+			'multis_channel_id',
+			'discount_amt_field',
+			'discounts_info_field'
+		))) {
+			return false;
+		}
 
 		$discounts_info_field = $this->settings['discounts_info_field'];
 		$order->$discounts_info_field = "";
+
+		$multis = $this->get_bundle_entries();
+		$items = $this->get_cart_items($order);
+
+		if(count($items) < 1) {
+			return false;
+		}
+
+		$item_ids = $this->get_item_ids($order->items);
 
 		foreach($multis->result_array() as $multi)
 		{
@@ -188,7 +203,9 @@ class Store_bundles_ext {
 				$discount_amt = $this->calculate_discount_amt($discounts_count, $multi_entry);
 
 				if($discount_amt > 0) {
-					$order = $this->add_discounts_info($order, $multi_entry, $discount_amt);
+					for($i = 0; $i < $discounts_count; $i++) {
+						$order = $this->add_discounts_info($order, $multi_entry, $discount_amt);
+					}
 					$order->order_discount = $order->order_discount + $discount_amt;
 					$order->order_total -= $discount_amt;
 				}
@@ -197,9 +214,18 @@ class Store_bundles_ext {
 
         $order->save();
 
-        // print_r($order);
-
 		return $order;
+	}
+
+	public function settings_exist($settings)
+	{
+		foreach($settings as $setting) {
+			if(!isset($this->settings[$setting])) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	public function get_bundle_entries()
@@ -219,7 +245,7 @@ class Store_bundles_ext {
 		foreach($items as $item)
 		{
 			if(isset($item->entry_id)) {
-				$ids[] = $item->entry_id;
+				$ids[] = array("entry_id" => $item->entry_id, "item_qty" => $item->item_qty);
 			}
 		}
 		return !empty($ids) ? $ids : null;
@@ -257,21 +283,27 @@ class Store_bundles_ext {
 		while ($this->is_multi_discount($item_ids, $multi_ids, $min)) {
 			$matches += 1;
 		}
-
 		return $matches;
 	}
 
 	public function is_multi_discount(&$item_ids, $multi_ids, $min)
 	{
 		$group = array();
-		foreach($multi_ids as $index => $item_id)
+		foreach($multi_ids as $index => $multi_item_id)
 		{
-			if(($idx = array_search($item_id, $item_ids)) !== FALSE) {
-				$group[] = $item_id;
-				unset($multi_ids[$index]);
-				unset($item_ids[$idx]);
+			foreach($item_ids as $key => &$item)
+			{
+				if($item['entry_id'] == $multi_item_id && !in_array($multi_item_id, $group)) {
+					$group[] = $multi_item_id;
+					unset($multi_ids[$index]);
+					$item['item_qty'] -= 1;
+					if($item['item_qty'] < 1) {
+						unset($item_ids[$key]);
+					}
+				}
 			}
 		}
+
 		if(count($group) == $min) {
 			return $group;
 		}
@@ -289,20 +321,26 @@ class Store_bundles_ext {
 
 		$info_field = $this->settings['discounts_info_field'];
 		$current_info = unserialize($order->$info_field);
+		$discount_val = (float)$multi_entry[$this->settings['discount_amt_field']];
 
 		if(empty($current_info)) {
 			$current_info = array();
 		}
 
-		$discount_val = (float)$multi_entry[$this->settings['discount_amt_field']];
-
-		$discount = array(
-			"title" => $multi_entry['title'],
-			"discount_val" => $discount_val,
-			"discount" => "&pound;" . number_format($discount_val, 2)
-		);
-
-		$current_info[] = $discount;
+		if(isset($current_info[$multi_entry['entry_id']])) {
+			$discount = $current_info[$multi_entry['entry_id']];
+			$discount['discount_val'] += $discount_val;
+			$discount['discount'] = "&pound;" . number_format($discount['discount_val'], 2);
+		}
+		else {
+			$discount = array(
+				"title" => $multi_entry['title'],
+				"discount_val" => $discount_val,
+				"discount" => "&pound;" . number_format($discount_val, 2)
+			);
+		}
+		
+		$current_info[$multi_entry['entry_id']] = $discount;
 
 		$order->$info_field = serialize($current_info);
 
