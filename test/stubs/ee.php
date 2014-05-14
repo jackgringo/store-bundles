@@ -82,8 +82,9 @@ class MockOrder {
 }
 
 class MockItem {
-    function __construct($entry_id)
+    function __construct($entry_id, $qty = 1)
     {
         $this->entry_id = $entry_id; 
+        $this->item_qty = $qty;
     }
 }
