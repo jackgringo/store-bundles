@@ -27,10 +27,14 @@ class Store_bundles {
 		$order = $this->EE->store->orders->get_cart();
 		$discount_info_field = $this->get_info_field();
 		$discounts = unserialize($order->$discount_info_field);
+		if(empty($discounts)){
+			return false;
+		}
 		foreach($discounts as &$discount) {
 			$discount['discount_title'] = $discount['title'];
 			unset($discount['title']);
 		}
+		$discounts = array_values($discounts);
 		if(!empty($discounts)){
 			return $this->EE->TMPL->parse_variables($this->EE->TMPL->tagdata, $discounts);
 		}
